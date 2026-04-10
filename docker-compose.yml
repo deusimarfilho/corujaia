@@ -1,0 +1,179 @@
+name: corujaia
+
+services:
+
+  # ------------------------------------------------------
+  # Ollama com Gemma 4 26B (18 GB, mais completo)
+  # Modelos disponiveis: gemma4:26b (ativo) | gemma4:e2b
+  # ------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: corujaia_ollama
+    volumes:
+      # Modelos e config persistem dentro do projeto
+      - ./data/ollama:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      # CPU: use todos os nucleos logicos da maquina (ajuste se quiser reservar nucleos)
+      - OMP_NUM_THREADS=12
+      - OLLAMA_RUNNER_THREADS=12
+      # Mantem o modelo carregado na RAM entre mensagens (evita recarga lenta)
+      - OLLAMA_KEEP_ALIVE=24h
+    # GPU: sua placa e AMD Radeon Pro W5500 (nao NVIDIA)
+    # Para aceleracao AMD, seria necessario ROCm
+    networks:
+      - corujaia_net
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 15s
+      timeout: 10s
+      retries: 8
+      start_period: 30s
+
+  # ------------------------------------------------------
+  # Warmup (opcional): carrega gemma4:26b na RAM com o mesmo num_ctx do AnythingLLM
+  # para a 1ª mensagem no chat nao pagar 20-40s de "silencio" (CPU + KV grande).
+  # Corre em paralelo; nao bloqueia o AnythingLLM. Recrie o servico para repetir: 
+  #   docker compose run --rm ollama-warmup
+  # ------------------------------------------------------
+  ollama-warmup:
+    image: curlimages/curl:8.11.1
+    container_name: corujaia_ollama_warmup
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - corujaia_net
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo '>>> Warmup: a procurar gemma4:26b no Ollama...'
+        for i in $$(seq 1 72); do
+          if curl -sfS "http://ollama:11434/api/tags" | grep -q 'gemma4:26b'; then
+            break
+          fi
+          sleep 5
+        done
+        if ! curl -sfS "http://ollama:11434/api/tags" | grep -q 'gemma4:26b'; then
+          echo '>>> Warmup: gemma4:26b nao encontrado (execute docker compose run --rm ollama-pull se for a 1ª vez).'
+          exit 0
+        fi
+        echo '>>> Warmup: a carregar runner + KV (CPU; pode demorar varios minutos na 1ª vez)...'
+        curl -sfS --max-time 1800 -H 'Content-Type: application/json' \
+          -d '{"model":"gemma4:26b","think":false,"stream":false,"options":{"num_ctx":65536},"messages":[{"role":"user","content":"."}]}' \
+          "http://ollama:11434/api/chat" >/dev/null || echo '>>> Warmup: pedido falhou (Ollama ocupado ou timeout).'
+        echo '>>> Warmup: feito.'
+
+  # ------------------------------------------------------
+  # Init: baixa os modelos na primeira execucao e sai
+  # Executa apenas uma vez (restart: "no")
+  # ------------------------------------------------------
+  ollama-pull:
+    image: ollama/ollama:latest
+    container_name: corujaia_ollama_pull
+    environment:
+      # Aponta o CLI para o servidor Ollama dentro da rede Docker
+      - OLLAMA_HOST=http://ollama:11434
+    entrypoint: >
+      /bin/sh -c "
+        echo '>>> Baixando Gemma 4 26B (18 GB, mais capaz)...' &&
+        ollama pull gemma4:26b &&
+        echo '>>> Baixando Gemma 4 E2B (7.2 GB, opcao leve)...' &&
+        ollama pull gemma4:e2b &&
+        echo '>>> Baixando modelo de embedding...' &&
+        ollama pull nomic-embed-text &&
+        echo '>>> Modelos prontos!'
+      "
+    depends_on:
+      ollama:
+        condition: service_healthy
+    networks:
+      - corujaia_net
+    restart: "no"
+
+  # ------------------------------------------------------
+  # Init: ajusta permissoes do volume Linux do LanceDB
+  # O container do AnythingLLM roda como uid/gid 1000
+  # ------------------------------------------------------
+  anythingllm-init:
+    image: alpine:latest
+    container_name: corujaia_anythingllm_init
+    command: >
+      sh -c "
+        mkdir -p /volume &&
+        chown -R 1000:1000 /volume &&
+        chmod -R 775 /volume
+      "
+    volumes:
+      - lancedb_data:/volume
+    restart: "no"
+
+  # ------------------------------------------------------
+  # O Indexador e Interface: AnythingLLM
+  # Gerencia workspaces (casos) e RAG sobre os arquivos
+  # ------------------------------------------------------
+  anythingllm:
+    image: mintplexlabs/anythingllm:latest
+    container_name: corujaia_anythingllm
+    ports:
+      - "3001:3001"
+    volumes:
+      # Docs, DB e config no projeto Windows
+      - ./data/anythingllm:/app/server/storage
+      # LanceDB em volume Linux nativo. NTFS do Windows nao suporta
+      # os arquivos temporarios que o LanceDB cria (ex: arquivo#1)
+      - lancedb_data:/app/server/storage/lancedb
+      # Patch: desliga thinking na API e evita stream travado (Gemma 4 + AnythingLLM)
+      - ./patches/anythingllm-ollama-index.js:/app/server/utils/AiProviders/ollama/index.js:ro
+    environment:
+      - STORAGE_DIR=/app/server/storage
+      - SERVER_PORT=3001
+
+      # LLM Provider -> Ollama
+      - LLM_PROVIDER=ollama
+      - OLLAMA_BASE_PATH=http://ollama:11434
+      # false = resposta direta; true ativa raciocinio separado (pode travar UI com alguns modelos)
+      - OLLAMA_THINK=false
+      # Modelo ativo: 26b (mais completo, porem mais lento em CPU)
+      - OLLAMA_MODEL_PREF=gemma4:26b
+      # Contexto por pedido (tokens). gemma4:26b suporta ate ~262k; valores muito altos
+      # em CPU deixam o chat lento (KV enorme). 64k e um bom meio-termo para docs longos + RAG.
+      - OLLAMA_MODEL_TOKEN_LIMIT=65536
+      # Timeout generoso para rodar em CPU
+      - OLLAMA_RESPONSE_TIMEOUT=7200000
+
+      # Embeddings via NativeEmbedder (mais rapido em CPU)
+      # Melhor opcao para indexacao rapida no seu ambiente atual
+      - EMBEDDING_ENGINE=native
+
+      # Seguranca
+      # IMPORTANTE: troque este valor antes de expor na rede!
+      - JWT_SECRET=5df852711ef630dc201d9c16bc038a8499e473f82d5e9c4b505aed3e383ce3fb
+
+    depends_on:
+      ollama:
+        condition: service_healthy
+      anythingllm-init:
+        condition: service_completed_successfully
+    networks:
+      - corujaia_net
+    restart: unless-stopped
+
+# ----------------------------------------------------------
+# Rede interna: servicos se comunicam pelo nome do container
+# ----------------------------------------------------------
+networks:
+  corujaia_net:
+    driver: bridge
+
+# ----------------------------------------------------------
+# Volume nativo Linux para LanceDB
+# NTFS (Windows) nao suporta os arquivos temporarios do LanceDB
+# Este volume fica em /var/lib/docker/volumes/ no WSL2 (ext4)
+# ----------------------------------------------------------
+volumes:
+  lancedb_data:
+    driver: local
