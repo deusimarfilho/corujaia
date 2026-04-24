@@ -4,7 +4,7 @@ Para arquivos grandes, o melhor fluxo e quebrar a planilha em partes menores ant
 
 ## Como usar
 
-Para um `.xlsx`:
+Para um `.xlsx` ou `.xls`:
 
 ```bash
 python "E:\xampp\htdocs\corujaia\tools\prepare_large_tabular.py" "CAMINHO_DO_ARQUIVO.xlsx"
@@ -25,10 +25,10 @@ python "E:\xampp\htdocs\corujaia\tools\prepare_large_tabular.py" "CAMINHO_DO_ARQ
 
 ## Fluxo recomendado
 
-1. Rodar o script no `.xlsx` grande
+1. Rodar o script no `.xls`, `.xlsx` ou `.csv` grande
 2. Subir os `.csv` gerados para o workspace no AnythingLLM
 3. Fazer perguntas especificas no chat
 
 ## Observacao
 
-Mesmo com modelo grande, o chat nao consegue colocar uma planilha inteira enorme em uma unica resposta. Dividir o arquivo antes do upload e a forma mais confiavel de fazer o sistema "ler tudo" ao longo das consultas.
+Para `.xls` antigo, isso e ainda mais importante: o AnythingLLM tende a tratar esse formato como texto bruto, gerando milhares de trechos e deixando o upload muito lento. Dividir antes do upload e a forma mais confiavel de fazer o sistema "ler tudo" ao longo das consultas.

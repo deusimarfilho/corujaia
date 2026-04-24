@@ -33,14 +33,15 @@ services:
       start_period: 30s
 
   # ------------------------------------------------------
-  # Warmup (opcional): carrega gemma4:26b na RAM com o mesmo num_ctx do AnythingLLM
-  # para a 1ª mensagem no chat nao pagar 20-40s de "silencio" (CPU + KV grande).
-  # Corre em paralelo; nao bloqueia o AnythingLLM. Recrie o servico para repetir: 
+  # Warmup manual (opcional): carrega gemma4:26b na RAM com o mesmo num_ctx do
+  # AnythingLLM. Nao sobe automaticamente, porque em CPU pode monopolizar o Ollama
+  # por varios minutos e atrasar o chat real. Rode manualmente quando quiser:
   #   docker compose run --rm ollama-warmup
   # ------------------------------------------------------
   ollama-warmup:
     image: curlimages/curl:8.11.1
     container_name: corujaia_ollama_warmup
+    profiles: ["manual"]
     depends_on:
       ollama:
         condition: service_healthy
@@ -139,8 +140,8 @@ services:
       - OLLAMA_THINK=false
       # Modelo ativo: 26b (mais completo, porem mais lento em CPU)
       - OLLAMA_MODEL_PREF=gemma4:26b
-      # Contexto por pedido (tokens). gemma4:26b suporta ate ~262k; valores muito altos
-      # em CPU deixam o chat lento (KV enorme). 64k e um bom meio-termo para docs longos + RAG.
+      # Contexto por pedido (tokens). gemma4:26b suporta ate ~262k; 64k aumenta bastante
+      # o espaco util para RAG/documentos sem voltar ao custo extremo de 262k em CPU.
       - OLLAMA_MODEL_TOKEN_LIMIT=65536
       # Timeout generoso para rodar em CPU
       - OLLAMA_RESPONSE_TIMEOUT=7200000

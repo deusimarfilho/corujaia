@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from typing import Iterable, Iterator
 
+import pandas as pd
 from openpyxl import load_workbook
 
 
@@ -30,6 +31,19 @@ def iter_xlsx_sheets(path: Path) -> Iterator[tuple[str, Iterator[list[str]]]]:
                 yield ["" if value is None else str(value) for value in row]
 
         yield sheet.title, row_iter()
+
+
+def iter_xls_sheets(path: Path) -> Iterator[tuple[str, Iterator[list[str]]]]:
+    workbook = pd.ExcelFile(path, engine="xlrd")
+    for sheet_name in workbook.sheet_names:
+        dataframe = workbook.parse(sheet_name=sheet_name, dtype=str).fillna("")
+
+        def row_iter() -> Iterator[list[str]]:
+            yield [str(column) for column in dataframe.columns.tolist()]
+            for row in dataframe.itertuples(index=False, name=None):
+                yield ["" if value is None else str(value) for value in row]
+
+        yield sheet_name, row_iter()
 
 
 def chunk_rows(
@@ -103,11 +117,34 @@ def process_xlsx(path: Path, output_dir: Path, rows_per_file: int) -> dict:
     return summary
 
 
+def process_xls(path: Path, output_dir: Path, rows_per_file: int) -> dict:
+    summary = {
+        "source": str(path),
+        "type": "xls",
+        "rows_per_file": rows_per_file,
+        "sheets": [],
+    }
+
+    for sheet_name, rows in iter_xls_sheets(path):
+        sheet_dir = output_dir / safe_name(path.stem)
+        sheet_prefix = sheet_dir / safe_name(sheet_name)
+        total_rows, file_count = chunk_rows(rows, sheet_prefix, rows_per_file)
+        summary["sheets"].append(
+            {
+                "sheet": sheet_name,
+                "total_rows": total_rows,
+                "files_created": file_count,
+            }
+        )
+
+    return summary
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Quebra arquivos tabulares grandes em partes menores para upload no AnythingLLM."
     )
-    parser.add_argument("input_file", help="Arquivo .xlsx ou .csv de entrada.")
+    parser.add_argument("input_file", help="Arquivo .xls, .xlsx ou .csv de entrada.")
     parser.add_argument(
         "--rows-per-file",
         type=int,
@@ -131,10 +168,12 @@ def main() -> int:
     suffix = input_path.suffix.lower()
     if suffix == ".csv":
         summary = process_csv(input_path, output_dir, args.rows_per_file)
+    elif suffix == ".xls":
+        summary = process_xls(input_path, output_dir, args.rows_per_file)
     elif suffix == ".xlsx":
         summary = process_xlsx(input_path, output_dir, args.rows_per_file)
     else:
-        raise SystemExit("Formato nao suportado. Use .xlsx ou .csv.")
+        raise SystemExit("Formato nao suportado. Use .xls, .xlsx ou .csv.")
 
     manifest_path = output_dir / f"{safe_name(input_path.stem)}_manifest.json"
     manifest_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
