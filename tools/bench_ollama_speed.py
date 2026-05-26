@@ -32,7 +32,7 @@ def bench(model: str, prompt: str) -> None:
 
 
 if __name__ == "__main__":
-    model = sys.argv[1] if len(sys.argv) > 1 else "gemma4:26b"
+    model = sys.argv[1] if len(sys.argv) > 1 else "qwen2.5:7b"
     prompt = (
         sys.argv[2]
         if len(sys.argv) > 2

@@ -54,8 +54,8 @@ class OllamaAILLM {
   }
 
   /**
-   * Ollama thinking (raciocínio em campo separado). Default false evita chat “travado” com Gemma 4
-   * quando só chegam chunks em `thinking` e `content` fica vazio. OLLAMA_THINK=true para ativar.
+   * Ollama thinking (raciocinio em campo separado). Default false evita chat "travado"
+   * quando o modelo envia apenas `thinking` e `content` fica vazio. OLLAMA_THINK=true para ativar.
    */
   static #ollamaThinkFromEnv() {
     const v = String(process.env.OLLAMA_THINK || "").toLowerCase();
