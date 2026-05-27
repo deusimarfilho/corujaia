@@ -381,10 +381,17 @@ class PGVector extends VectorDatabase {
       "ALGUM",
       "ALGUNS",
       "AQUI",
+      "ASSOCIADA",
+      "ASSOCIADAS",
+      "ASSOCIADO",
+      "ASSOCIADOS",
       "CIDADE",
       "COM",
       "DAS",
+      "DE",
       "DOS",
+      "DOCUMENTO",
+      "DOCUMENTOS",
       "ELA",
       "ELE",
       "ESSA",
@@ -396,17 +403,64 @@ class PGVector extends VectorDatabase {
       "INFORMAÇÃO",
       "INFORMAÇÕES",
       "INFORMAR",
+      "NA",
       "NAO",
+      "NAS",
+      "NO",
+      "NOME",
+      "NOMES",
+      "NOS",
       "NÃO",
       "PESSOA",
+      "PESSOAS",
+      "PRECISO",
       "QUAL",
+      "QUE",
       "RELACAO",
       "RELAÇÃO",
       "RESPEITO",
       "SABE",
+      "SAO",
+      "SÃO",
       "SOBRE",
       "TEM",
       "UMA",
+      "CRUZAR",
+      "CRUZAMENTO",
+      "CRUZANDO",
+      "DADOS",
+      "INDEXADOS",
+      "INDEXADO",
+      "SEMPRE",
+      "ALTA",
+      "PRECISAO",
+      "PRECISÃO",
+      "LOCALIDADE",
+      "CITADAS",
+      "CITADOS",
+      "CITADA",
+      "CITADO",
+      "DIZ",
+      "DIZEM",
+      "DIZER",
+      "ME",
+      "LHE",
+      "SEU",
+      "SUA",
+      "SEUS",
+      "SUAS",
+      "AQUI",
+      "ALI",
+      "ONDE",
+      "COMO",
+      "QUANDO",
+      "QUALQUER",
+      "TODO",
+      "TODA",
+      "TODOS",
+      "TODAS",
+      "MESMO",
+      "MESMA",
     ]);
 
     return String(input)
@@ -484,75 +538,298 @@ class PGVector extends VectorDatabase {
       .map((item) => item.metadata);
   }
 
-  async structuredEntityResponse({
-    client,
-    input = "",
-    topN = 4,
-  }) {
-    const groups = this.keywordSearchGroups(input);
-    const terms = groups
-      .flatMap(({ variants, weight }) => variants.map((variant) => ({ variant, weight })))
-      .filter(({ variant }) => variant && variant.length >= 3);
+  looksLikePersonName(value = "") {
+    const normalized = String(value)
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "")
+      .toUpperCase()
+      .trim();
+    const words = normalized.split(/\s+/).filter(Boolean);
+    if (words.length < 2 || words.length > 6) return false;
 
+    const blocked = new Set([
+      "POR",
+      "COMO",
+      "PARA",
+      "SOBRE",
+      "MAE",
+      "PAI",
+      "COM",
+      "NAO",
+      "SUA",
+      "TIPO",
+      "CODIGO",
+      "ENVOLVIDO",
+      "PRINCIPAIS",
+      "FREQUENTES",
+      "NATURAL",
+      "JURIDICA",
+      "COLOCA",
+      "GALOS",
+      "COMPETICAO",
+      "DEUS",
+      "ACIMA",
+      "TUDO",
+      "NESSA",
+      "ATIVIDADE",
+      "ILICITA",
+      "DESCUMPRIR",
+      "SEGUE",
+      "EXPLICANDO",
+      "DEVE",
+      "SER",
+      "ABRIU",
+      "CONTA",
+      "CORRENTE",
+      "AGENCIA",
+      "QUERENDO",
+      "MORRE",
+      "RESPONDENDO",
+      "AMEACAS",
+      "TRATAR",
+      "SITUACAO",
+      "INTERLOCUTORA",
+      "IZADAS",
+      "JUDICIALMENTE",
+      "USO",
+      "INDEVIDO",
+      "RIAM",
+      "TDN",
+      "QUE",
+      "MEI",
+      "PAO",
+      "COAGE",
+      "SEUS",
+      "DEG",
+      "DATA",
+      "EMISSAO",
+      "POSSE",
+      "IZACAO",
+      "PRA",
+      "POSSA",
+      "CANCELAR",
+      "FUNCAO",
+      "FUNÇÃO",
+      "OBSERVADOS",
+      "MENSAGENS",
+    ]);
+    const connectors = new Set(["DE", "DA", "DO", "DAS", "DOS", "E"]);
+    if (words.some((word) => blocked.has(word))) return false;
+    if (words.filter((word) => !connectors.has(word)).length < 2) return false;
+    if (words.some((word) => !connectors.has(word) && word.length < 3)) return false;
+    return true;
+  }
+
+  async filterSelectiveTerms(client, terms = []) {
     if (terms.length === 0) return [];
 
     const valuesSql = terms
       .map((_, index) => `($${index * 2 + 1}::text, $${index * 2 + 2}::numeric)`)
       .join(", ");
     const params = terms.flatMap(({ variant, weight }) => [variant, Number(weight)]);
-    params.push(Math.min(Math.max(topN, 6), 12));
-    const limitPlaceholder = `$${params.length}`;
+
+    const response = await client.query(
+      `WITH consulta(termo, peso) AS (VALUES ${valuesSql}),
+            counts AS (
+              SELECT
+                consulta.termo,
+                consulta.peso,
+                COUNT(DISTINCT e.nome_arquivo)::int AS docs
+              FROM consulta
+              JOIN sincronismo_entidades e ON e.valor_normalizado ILIKE '%' || consulta.termo || '%'
+              GROUP BY consulta.termo, consulta.peso
+            )
+       SELECT termo, peso, docs FROM counts ORDER BY docs ASC, LENGTH(termo) DESC`,
+      params
+    );
+
+    if (response.rows.length === 0) return terms;
+    const minDocs = Number(response.rows[0].docs || 0);
+    const selective = response.rows.filter(
+      (row) => Number(row.docs) <= Math.max(minDocs + 80, 220)
+    );
+    const picked = selective.length > 0 ? selective : [response.rows[0]];
+    return picked.map((row) => ({
+      variant: row.termo,
+      weight: Number(row.peso || 1),
+    }));
+  }
+
+  buildCrossRefSource({
+    title,
+    resumo,
+    total,
+    sourceDocument = "CRUZAMENTO_ENTIDADES",
+    focusTerms = [],
+    wantsPeopleOnly = false,
+  }) {
+    const focus =
+      focusTerms.length > 0 ? focusTerms.join(", ") : "os termos relevantes da pergunta";
+    const mandatory = wantsPeopleOnly
+      ? `INSTRUCAO OBRIGATORIA (NAO IGNORE): A pergunta pede PESSOAS em documentos que mencionam ${focus}. ` +
+        `Foram encontradas ${total} pessoa(s) no cruzamento estruturado abaixo. ` +
+        `Voce DEVE listar TODOS os nomes do bloco PESSOAS na resposta, com os arquivos de origem. ` +
+        `E PROIBIDO dizer que nao ha pessoas associadas a ${focus} se o bloco PESSOAS nao estiver vazio.\n\n`
+      : `INSTRUCAO OBRIGATORIA (NAO IGNORE): Cruzamento estruturado relacionado a ${focus}. ` +
+        `Use TODOS os itens listados abaixo na resposta.\n\n`;
+
+    return {
+      id: "structured-crossref",
+      url: "sincronismo_entidades",
+      title,
+      docAuthor: "indice estruturado",
+      description: `Cruzamento estruturado (${total} entidades) para ${focus}.`,
+      docSource: "sincronismo_entidades",
+      chunkSource: "structured-entity-index",
+      published: new Date().toISOString(),
+      wordCount: 0,
+      token_count_estimate: 0,
+      text:
+        `<document_metadata>\nsourceDocument: ${sourceDocument}\nsourceType: structured_entity_index\n</document_metadata>\n\n` +
+        mandatory +
+        `Resumo estruturado para cruzamento (${total} entidades):\n${resumo}`,
+      score: 9999,
+    };
+  }
+
+  formatCrossRefSections(rows = [], { wantsPeopleOnly = false } = {}) {
+    const buckets = {
+      pessoa: [],
+      local: [],
+      endereco: [],
+      crime: [],
+      cpf: [],
+      telefone: [],
+      processo: [],
+      inquerito: [],
+    };
+    const labels = {
+      pessoa: "PESSOAS",
+      local: "LOCAIS",
+      endereco: "ENDERECOS",
+      crime: "CRIMES",
+      cpf: "CPFS",
+      telefone: "TELEFONES",
+      processo: "PROCESSOS",
+      inquerito: "INQUERITOS",
+    };
+    const limits = {
+      pessoa: wantsPeopleOnly ? 35 : 25,
+      local: 10,
+      endereco: 10,
+      crime: 10,
+      cpf: 8,
+      telefone: 8,
+      processo: 6,
+      inquerito: 6,
+    };
+    const order = wantsPeopleOnly
+      ? ["pessoa"]
+      : ["pessoa", "local", "endereco", "crime", "cpf", "telefone", "processo", "inquerito"];
+
+    rows.forEach((row) => {
+      const tipo = row.tipo_entidade;
+      if (!buckets[tipo]) return;
+      if (tipo === "pessoa" && !this.looksLikePersonName(row.valor)) return;
+      buckets[tipo].push(`- ${row.valor} | arquivos: ${row.arquivos}`);
+    });
+
+    const sections = [];
+    let total = 0;
+    order.forEach((tipo) => {
+      const items = buckets[tipo].slice(0, limits[tipo]);
+      if (items.length === 0) return;
+      total += items.length;
+      sections.push(`${labels[tipo]}:\n${items.join("\n")}`);
+    });
+
+    return { text: sections.join("\n\n"), total };
+  }
+
+  async structuredEntityResponse({
+    client,
+    input = "",
+    topN = 4,
+  }) {
+    const groups = this.keywordSearchGroups(input);
+    let terms = groups
+      .flatMap(({ variants, weight }) => variants.map((variant) => ({ variant, weight })))
+      .filter(({ variant }) => variant && variant.length >= 3);
+
+    if (terms.length === 0) return [];
+
+    const normalizedInput = String(input)
+      .toUpperCase()
+      .normalize("NFD")
+      .replace(/[\u0300-\u036f]/g, "");
+    const wantsPeopleOnly = /\b(PESSOA|PESSOAS|NOME|NOMES)\b/.test(normalizedInput);
 
     try {
+      terms = await this.filterSelectiveTerms(client, terms);
+      if (terms.length === 0) return [];
+
+      const focusTerms = terms.map(({ variant }) => variant);
+      const valuesSql = terms
+        .map((_, index) => `($${index * 2 + 1}::text, $${index * 2 + 2}::numeric)`)
+        .join(", ");
+      const params = terms.flatMap(({ variant, weight }) => [variant, Number(weight)]);
+
       const response = await client.query(
         `WITH consulta(termo, peso) AS (VALUES ${valuesSql}),
-              matches AS (
+              matched_docs AS (
                 SELECT
                   e.nome_arquivo,
-                  e.local_anything,
-                  e.tipo_entidade,
-                  e.valor,
-                  e.contexto,
-                  e.data_extracao,
-                  consulta.peso
+                  SUM(consulta.peso) AS score
                 FROM sincronismo_entidades e
                 JOIN consulta ON e.valor_normalizado ILIKE '%' || consulta.termo || '%'
+                GROUP BY e.nome_arquivo
+              ),
+              entities AS (
+                SELECT
+                  e.tipo_entidade,
+                  e.valor_normalizado,
+                  MIN(e.valor) AS valor,
+                  STRING_AGG(DISTINCT e.nome_arquivo, ', ' ORDER BY e.nome_arquivo) AS arquivos,
+                  MAX(d.score) AS score
+                FROM matched_docs d
+                JOIN sincronismo_entidades e ON e.nome_arquivo = d.nome_arquivo
+                WHERE e.tipo_entidade IN ('pessoa', 'cpf', 'telefone', 'crime', 'endereco', 'local', 'processo', 'inquerito')
+                GROUP BY e.tipo_entidade, e.valor_normalizado
               )
-         SELECT
-           nome_arquivo,
-           local_anything,
-           SUM(peso) AS score,
-           MAX(data_extracao) AS published,
-           LEFT(
-             STRING_AGG(
-               DISTINCT tipo_entidade || ': ' || valor || COALESCE(' | contexto: ' || NULLIF(contexto, ''), ''),
-               E'\n'
-             ),
-             6000
-           ) AS resumo
-         FROM matches
-         GROUP BY nome_arquivo, local_anything
-         ORDER BY score DESC, published DESC
-         LIMIT ${limitPlaceholder}`,
+         SELECT tipo_entidade, valor, arquivos, score
+         FROM entities
+         ORDER BY
+           CASE tipo_entidade
+             WHEN 'pessoa' THEN 1
+             WHEN 'cpf' THEN 2
+             WHEN 'telefone' THEN 3
+             WHEN 'crime' THEN 4
+             WHEN 'endereco' THEN 5
+             WHEN 'local' THEN 6
+             WHEN 'processo' THEN 7
+             ELSE 8
+           END,
+           score DESC,
+           valor ASC
+         LIMIT 120`,
         params
       );
 
-      return response.rows.map((row) => ({
-        id: `structured-${row.nome_arquivo}`,
-        url: row.local_anything || row.nome_arquivo,
-        title: `[ENTIDADES] ${row.nome_arquivo}`,
-        docAuthor: "indice estruturado",
-        description: "Entidades extraidas para cruzamento investigativo.",
-        docSource: "sincronismo_entidades",
-        chunkSource: "structured-entity-index",
-        published: row.published?.toISOString?.() || String(row.published || ""),
-        wordCount: 0,
-        token_count_estimate: 0,
-        text:
-          `<document_metadata>\nsourceDocument: ${row.nome_arquivo}\nsourceType: structured_entity_index\n</document_metadata>\n\n` +
-          `Resumo estruturado para cruzamento:\n${row.resumo}`,
-        score: Number(row.score || 0),
-      }));
+      const formatted = this.formatCrossRefSections(response.rows, { wantsPeopleOnly });
+      if (!formatted.text) return [];
+
+      return [
+        this.buildCrossRefSource({
+          title: wantsPeopleOnly
+            ? "[CRUZAMENTO] Pessoas encontradas"
+            : "[CRUZAMENTO] Cruzamento entre documentos",
+          resumo: formatted.text,
+          total: formatted.total,
+          sourceDocument: wantsPeopleOnly ? "CRUZAMENTO_PESSOAS" : "CRUZAMENTO_ENTIDADES",
+          focusTerms,
+          wantsPeopleOnly,
+        }),
+      ];
     } catch (error) {
       this.logger(`Structured entity search skipped: ${error.message}`);
       return [];
@@ -583,6 +860,10 @@ class PGVector extends VectorDatabase {
     if (structuredMatches.length > 0)
       this.logger(`Structured entity search found ${structuredMatches.length} matches for query.`);
 
+    const hasPeopleCrossRef =
+      structuredMatches.length > 0 &&
+      String(structuredMatches[0]?.title || "").includes("Pessoas encontradas");
+
     structuredMatches.forEach((metadata) => {
       const identifier = sourceIdentifier(metadata);
       if (seenSources.has(identifier)) return;
@@ -592,51 +873,77 @@ class PGVector extends VectorDatabase {
       result.scores.push(metadata.score || 1);
     });
 
-    const keywordMatches = await this.keywordResponse({
-      client,
-      namespace,
-      input,
-      topN,
-      filterIdentifiers,
-    });
-    if (keywordMatches.length > 0)
-      this.logger(`Keyword search found ${keywordMatches.length} exact matches for query.`);
+    const supplementalTopN = hasPeopleCrossRef ? Math.max(2, Math.min(topN, 3)) : topN;
 
-    keywordMatches.forEach((metadata) => {
-      const identifier = sourceIdentifier(metadata);
-      if (seenSources.has(identifier)) return;
-      seenSources.add(identifier);
-      result.contextTexts.push(metadata.text);
-      result.sourceDocuments.push({ ...metadata, score: 1 });
-      result.scores.push(1);
-    });
-
-    const embedding = `[${queryVector.map(Number).join(",")}]`;
-    const response = await client.query(
-      `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata FROM "${PGVector.tableName()}" WHERE namespace = $2 ORDER BY _distance ASC LIMIT $3`,
-      [embedding, namespace, topN]
-    );
-    response.rows.forEach((item) => {
-      if (this.distanceToSimilarity(item._distance) < similarityThreshold)
-        return;
-      if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
-        this.logger(
-          "A source was filtered from context as it's parent document is pinned."
-        );
-        return;
-      }
-
-      const identifier = sourceIdentifier(item.metadata);
-      if (seenSources.has(identifier)) return;
-      seenSources.add(identifier);
-
-      result.contextTexts.push(item.metadata.text);
-      result.sourceDocuments.push({
-        ...item.metadata,
-        score: this.distanceToSimilarity(item._distance),
+    try {
+      const keywordMatches = await this.keywordResponse({
+        client,
+        namespace,
+        input,
+        topN: supplementalTopN,
+        filterIdentifiers,
       });
-      result.scores.push(this.distanceToSimilarity(item._distance));
-    });
+      if (keywordMatches.length > 0)
+        this.logger(`Keyword search found ${keywordMatches.length} exact matches for query.`);
+
+      keywordMatches.forEach((metadata) => {
+        const identifier = sourceIdentifier(metadata);
+        if (seenSources.has(identifier)) return;
+        seenSources.add(identifier);
+        result.contextTexts.push(metadata.text);
+        result.sourceDocuments.push({ ...metadata, score: 1 });
+        result.scores.push(1);
+      });
+    } catch (error) {
+      this.logger(`Keyword search skipped: ${error.message}`);
+    }
+
+    try {
+      if (!Array.isArray(queryVector) || queryVector.length === 0) {
+        this.logger("Vector search skipped: invalid query vector.");
+      } else {
+        const embedding = `[${queryVector.map(Number).join(",")}]`;
+        const response = await client.query(
+          `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata FROM "${PGVector.tableName()}" WHERE namespace = $2 ORDER BY _distance ASC LIMIT $3`,
+          [embedding, namespace, supplementalTopN]
+        );
+        response.rows.forEach((item) => {
+          if (this.distanceToSimilarity(item._distance) < similarityThreshold)
+            return;
+          if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
+            this.logger(
+              "A source was filtered from context as it's parent document is pinned."
+            );
+            return;
+          }
+
+          const identifier = sourceIdentifier(item.metadata);
+          if (seenSources.has(identifier)) return;
+          seenSources.add(identifier);
+
+          result.contextTexts.push(item.metadata.text);
+          result.sourceDocuments.push({
+            ...item.metadata,
+            score: this.distanceToSimilarity(item._distance),
+          });
+          result.scores.push(this.distanceToSimilarity(item._distance));
+        });
+      }
+    } catch (error) {
+      this.logger(`Vector search skipped: ${error.message}`);
+    }
+
+    if (hasPeopleCrossRef && result.contextTexts.length > 1) {
+      const crossRefText = result.contextTexts[0];
+      const crossRefDoc = result.sourceDocuments[0];
+      const crossRefScore = result.scores[0];
+      const restTexts = result.contextTexts.slice(1);
+      const restDocs = result.sourceDocuments.slice(1);
+      const restScores = result.scores.slice(1);
+      result.contextTexts = [crossRefText, ...restTexts];
+      result.sourceDocuments = [crossRefDoc, ...restDocs];
+      result.scores = [crossRefScore, ...restScores];
+    }
 
     return result;
   }
@@ -977,17 +1284,22 @@ class PGVector extends VectorDatabase {
         filterIdentifiers,
       });
 
-      const { contextTexts, sourceDocuments } = result;
+      const { contextTexts = [], sourceDocuments = [] } = result || {};
       const sources = sourceDocuments.map((metadata, i) => {
         return { metadata: { ...metadata, text: contextTexts[i] } };
       });
       return {
         contextTexts,
-        sources: this.curateSources(sources),
+        sources: this.curateSources(sources) || [],
         message: false,
       };
     } catch (err) {
-      return { error: err.message, success: false };
+      this.logger(`performSimilaritySearch failed: ${err.message}`);
+      return {
+        contextTexts: [],
+        sources: [],
+        message: err.message,
+      };
     } finally {
       if (connection) await connection.end();
     }

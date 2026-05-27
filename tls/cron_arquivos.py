@@ -24,17 +24,24 @@ API_KEY = "YEYBJBE-HZ24RMS-GGCSCM2-Z4JR33C"
 # Slug real do workspace no AnythingLLM/PostgreSQL. Slug e case-sensitive.
 WORKSPACE_SLUG = "sbdi_coin"
 WORKSPACE_PROMPT = (
-    "Responda priorizando os arquivos indexados deste workspace. "
-    "Use como fonte principal apenas o contexto recuperado dos documentos indexados. "
-    "Os documentos fixados no contexto foram atualizados pelo cron e devem ser tratados como "
-    "documentos disponiveis no workspace, mesmo que o usuario use termos como documento novo, "
-    "ultimo documento, arquivo recente ou arquivo anexado pelo cron. "
-    "Quando o usuario perguntar sobre documento novo ou recente, use primeiro o documento fixado "
-    "no contexto e cite o nome do arquivo quando ele estiver disponivel. "
-    "Se a resposta nao estiver claramente sustentada pelos arquivos indexados, diga explicitamente "
-    "que nao encontrou evidencia suficiente nos documentos deste workspace. "
-    "Nao invente fatos, nao complete lacunas com conhecimento externo e nao misture suposicoes "
-    "com informacoes documentais. Quando possivel, responda de forma objetiva e fiel ao conteudo encontrado."
+    "Voce e um assistente de cruzamento investigativo de alta precisao. "
+    "Responda SOMENTE com base nos arquivos indexados deste workspace e nas fontes estruturadas recuperadas. "
+    "Sempre cruze informacoes: use juntos o contexto dos documentos (trechos recuperados) e o indice estruturado de entidades. "
+    "Quando o contexto trouxer sourceType structured_entity_index, titulo iniciando com [CRUZAMENTO] ou o texto "
+    "Resumo estruturado para cruzamento, trate como evidencia primaria extraida dos documentos indexados. "
+    "Para qualquer pergunta (pessoa, local, crime, CPF, telefone, processo, inquerito, endereco), "
+    "liste TODAS as entidades relevantes do bloco [CRUZAMENTO] Cruzamento entre documentos ou [CRUZAMENTO] Pessoas encontradas, "
+    "mantendo o agrupamento por tipo (PESSOAS, LOCAIS, CRIMES, etc.) quando existir. "
+    "Nao omita nem ignore itens presentes nesse cruzamento; complemente com trechos dos arquivos quando ajudar a contextualizar. "
+    "Cite sempre o nome do arquivo de origem quando disponivel. "
+    "Nao diga que nao ha dados se o cruzamento estruturado listar entidades, mesmo que outro trecho do contexto seja incompleto. "
+    "Se o contexto contiver INSTRUCAO OBRIGATORIA ou [CONTEXT 0] com bloco PESSOAS, essa e a fonte principal: copie a lista de nomes na resposta. "
+    "Nunca contradiga o bloco PESSOAS do cruzamento estruturado. "
+    "Quando o usuario perguntar sobre documento novo, ultimo documento ou arquivo recente, "
+    "procure nos arquivos indexados e nas entidades estruturadas. "
+    "Se a resposta nao estiver sustentada pelos documentos indexados, diga explicitamente que nao encontrou evidencia suficiente. "
+    "Nao invente fatos, nao complete lacunas com conhecimento externo e nao misture suposicoes com informacoes documentais. "
+    "Responda de forma objetiva, completa e fiel ao conteudo encontrado."
 )
 
 # Configuração do PostgreSQL do projeto
@@ -60,29 +67,190 @@ PADROES_ENTIDADES = {
     "crime": re.compile(r"\b(?:HOMIC[IÍ]DIO|TR[AÁ]FICO|ROUBO|FURTO|EXTORS[AÃ]O|AMEA[CÇ]A|FAC[CÇ][AÃ]O|ORCRIM|DROGAS?|ARMA DE FOGO|DESLOCAMENTO FOR[CÇ]ADO|TENTATIVA DE HOMIC[IÍ]DIO)\b", re.IGNORECASE),
 }
 
-PADRAO_PESSOA = re.compile(
-    r"\b[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{3,}(?:\s+(?:DA|DE|DO|DAS|DOS|E))?(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{2,}){1,5}\b"
-)
+PADRAO_NOME_PESSOA = r"[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{3,}(?:[ \t]+(?:DA|DE|DO|DAS|DOS|E))?(?:[ \t]+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{2,}){1,4}"
+PADROES_PESSOA = [
+    re.compile(
+        rf"\b(?:NOME|VULGO|ALCUNHA|ALVO|INVESTIGADO|INVESTIGADA|ENVOLVIDO|ENVOLVIDA|INDIVIDUO|INDIVÍDUO|SUSPEITO|SUSPEITA|AUTOR|VITIMA|VÍTIMA|QUALIFICADO|QUALIFICADA|PESSOA)\s*(?:DE|DA|DO)?\s*[:\-]?\s*({PADRAO_NOME_PESSOA})\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b({PADRAO_NOME_PESSOA})\b[\s,.;:-]{{0,40}}(?:CPF|RG|NASCIDO|NASCIDA|FILHO|FILHA|VULGO|QUALIFICAÇÃO|QUALIFICACAO)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        rf"\b(?:HOMIC[IÍ]DIO DE|AMEA[CÇ]A A|CONTRA|EM DESFAVOR DE)\s+({PADRAO_NOME_PESSOA})\b",
+        re.IGNORECASE,
+    ),
+]
 PALAVRAS_NAO_PESSOA = {
-    "RELATORIO",
-    "RELATÓRIO",
-    "SECRETARIA",
-    "SEGURANCA",
-    "SEGURANÇA",
-    "PUBLICA",
-    "PÚBLICA",
-    "DEFESA",
-    "SOCIAL",
+    "ACESSO",
+    "ACOMPANHADO",
+    "ACOMPANHADOS",
+    "ALEM",
+    "ALÉM",
+    "ADMINISTRATIVAS",
+    "ANEXO",
+    "ANO",
+    "ANOTACOES",
+    "ANOTAÇÕES",
+    "APARELHO",
+    "ARQUIVO",
+    "BAIRRO",
+    "BASE",
+    "BATALHAO",
+    "BATALHÃO",
+    "BOLETIM",
+    "CADERNO",
+    "CADASTRADO",
+    "CANCELAMENTO",
+    "CARTEIRA",
+    "CELULAR",
+    "CERTIDAO",
+    "CERTIDÃO",
+    "CERTIFICADOS",
+    "CHAVE",
+    "CIVIS",
+    "COM",
+    "COMPANHIA",
+    "COMPROVANTES",
+    "CONDUTAS",
+    "CONFORME",
+    "CONSTA",
+    "CONSTAVAM",
+    "CONSTITUEM",
+    "CONTATO",
+    "CONTIDOS",
+    "CONTRA",
+    "CONCORDA",
     "COORDENADORIA",
+    "CORPORACAO",
+    "CORPORAÇÃO",
+    "CRIME",
+    "CRIANCA",
+    "CRIANÇA",
+    "DADOS",
+    "DEFESA",
+    "DEPOIMENTO",
+    "DESTA",
+    "DOCUMENTO",
+    "ESTADO",
+    "FALASSE",
+    "FALSIFICACAO",
+    "FALSIFICAÇÃO",
+    "FALSIFICACOES",
+    "FALSIFICAÇÕES",
+    "FILHAS",
+    "FONTE",
+    "GOVERNO",
+    "ILEGIVEL",
+    "ILEGÍVEL",
+    "ILICITAS",
+    "ILÍCITAS",
+    "IMAGEM",
+    "INDEVIDOS",
+    "INFOSEG",
+    "INGRESSO",
+    "INTEGRAR",
     "INTELIGENCIA",
     "INTELIGÊNCIA",
-    "DOCUMENTO",
+    "MILITAR",
+    "MUITO",
+    "MUNICIPIO",
+    "MUNICÍPIO",
+    "NACIONAL",
+    "NUMEROS",
+    "NÚMEROS",
+    "OBITO",
+    "ÓBITO",
+    "PELA",
+    "PELO",
+    "POLICIA",
+    "POLÍCIA",
+    "POSSIVEL",
+    "POSSÍVEL",
+    "QUALIFICACAO",
+    "QUALIFICAÇÃO",
+    "RATIFICA",
+    "PUBLICA",
+    "PÚBLICA",
+    "REFERENTES",
+    "RELATORIO",
+    "RELATÓRIO",
     "RESERVADO",
+    "RESPONSABILIDADES",
+    "SECRETARIA",
     "SECRETO",
-    "GOVERNO",
-    "ESTADO",
+    "SEGURANCA",
+    "SEGURANÇA",
+    "SEXUAL",
+    "SISTEMA",
+    "SITE",
+    "SOCIAL",
+    "SOFRIDO",
+    "SOLICITACAO",
+    "SOLICITAÇÃO",
+    "SUA",
+    "VEZ",
     "CEARA",
     "CEARÁ",
+    "POR",
+    "COMO",
+    "PARA",
+    "SOBRE",
+    "MAE",
+    "PAI",
+    "TIPO",
+    "CODIGO",
+    "ENVOLVIDO",
+    "PRINCIPAIS",
+    "FREQUENTES",
+    "NATURAL",
+    "JURIDICA",
+    "COLOCA",
+    "GALOS",
+    "COMPETICAO",
+    "DEUS",
+    "ACIMA",
+    "TUDO",
+    "NESSA",
+    "ATIVIDADE",
+    "ILICITA",
+    "DESCUMPRIR",
+    "SEGUE",
+    "EXPLICANDO",
+    "DEVE",
+    "SER",
+    "ABRIU",
+    "CONTA",
+    "CORRENTE",
+    "AGENCIA",
+    "QUERENDO",
+    "MORRE",
+    "RESPONDENDO",
+    "AMEACAS",
+    "TRATAR",
+    "SITUACAO",
+    "INTERLOCUTORA",
+    "IZADAS",
+    "JUDICIALMENTE",
+    "USO",
+    "INDEVIDO",
+    "RIAM",
+    "TDN",
+    "MEI",
+    "PAO",
+    "COAGE",
+    "DEG",
+    "EMISSAO",
+    "POSSE",
+    "IZACAO",
+    "PRA",
+    "POSSA",
+    "CANCELAR",
+    "FUNCAO",
+    "FUNÇÃO",
+    "OBSERVADOS",
+    "MENSAGENS",
 }
 
 # ---------------------------------------------------------------------------
@@ -177,7 +345,7 @@ def buscar_arquivo_registrado(conn, nome_arquivo):
 
 def normalizar_texto(valor):
     """Normaliza entidades para busca e cruzamento sem depender de acentos."""
-    texto = unicodedata.normalize("NFD", str(valor or ""))
+    texto = unicodedata.normalize("NFD", str(valor or "").replace("\x00", ""))
     texto = "".join(char for char in texto if unicodedata.category(char) != "Mn")
     texto = re.sub(r"\s+", " ", texto.upper()).strip()
     return texto
@@ -186,7 +354,7 @@ def contexto_do_match(texto, inicio, fim, tamanho=180):
     """Recorta uma janela curta ao redor da entidade encontrada."""
     esquerda = max(0, inicio - tamanho)
     direita = min(len(texto), fim + tamanho)
-    contexto = texto[esquerda:direita]
+    contexto = texto[esquerda:direita].replace("\x00", "")
     return re.sub(r"\s+", " ", contexto).strip()
 
 def caminho_documento_anything(local_anything):
@@ -214,13 +382,35 @@ def carregar_texto_anything(local_anything):
 def parece_nome_pessoa(valor):
     normalizado = normalizar_texto(valor)
     palavras = normalizado.split()
-    if len(palavras) < 2:
+    conectivos = {"DE", "DA", "DO", "DAS", "DOS", "E"}
+    if len(palavras) < 2 or len(palavras) > 6:
         return False
     if any(palavra in PALAVRAS_NAO_PESSOA for palavra in palavras):
         return False
     if any(char.isdigit() for char in normalizado):
         return False
+    substantivos = [palavra for palavra in palavras if palavra not in conectivos]
+    if len(substantivos) < 2:
+        return False
+    if any(len(palavra) < 3 for palavra in substantivos):
+        return False
     return True
+
+def limpar_nome_pessoa(valor):
+    """Remove marcadores que podem vir grudados no nome pelo OCR."""
+    nome = re.sub(
+        r"^(?:NOME|VULGO|ALCUNHA|ALVO|INVESTIGADO|INVESTIGADA|ENVOLVIDO|ENVOLVIDA|INDIVIDUO|INDIVÍDUO|SUSPEITO|SUSPEITA|AUTOR|VITIMA|VÍTIMA|PESSOA)\s+",
+        "",
+        valor.strip(),
+        flags=re.IGNORECASE,
+    )
+    nome = re.sub(
+        r"\s+(?:SUA|MAE|MÃE|PAI|RG|CPF|DN|ENDERECO|ENDEREÇO|QUALIFICACAO|QUALIFICAÇÃO)\b.*$",
+        "",
+        nome,
+        flags=re.IGNORECASE,
+    )
+    return re.sub(r"\s+", " ", nome).strip()
 
 def extrair_entidades_texto(texto):
     """Extrai entidades úteis para cruzamento investigativo."""
@@ -229,7 +419,7 @@ def extrair_entidades_texto(texto):
 
     for tipo, padrao in PADROES_ENTIDADES.items():
         for match in padrao.finditer(texto):
-            valor = match.group(0).strip(" .,;:\n\r\t")
+            valor = match.group(0).replace("\x00", "").strip(" .,;:\n\r\t")
             normalizado = normalizar_texto(valor)
             chave = (tipo, normalizado)
             if not normalizado or chave in vistos:
@@ -243,21 +433,22 @@ def extrair_entidades_texto(texto):
             })
 
     texto_upper = texto.upper()
-    for match in PADRAO_PESSOA.finditer(texto_upper):
-        valor = match.group(0).strip(" .,;:\n\r\t")
-        if not parece_nome_pessoa(valor):
-            continue
-        normalizado = normalizar_texto(valor)
-        chave = ("pessoa", normalizado)
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        entidades.append({
-            "tipo": "pessoa",
-            "valor": valor,
-            "valor_normalizado": normalizado,
-            "contexto": contexto_do_match(texto, match.start(), match.end()),
-        })
+    for padrao in PADROES_PESSOA:
+        for match in padrao.finditer(texto_upper):
+            valor = limpar_nome_pessoa(match.group(1).replace("\x00", "").strip(" .,;:\n\r\t"))
+            if not parece_nome_pessoa(valor):
+                continue
+            normalizado = normalizar_texto(valor)
+            chave = ("pessoa", normalizado)
+            if chave in vistos:
+                continue
+            vistos.add(chave)
+            entidades.append({
+                "tipo": "pessoa",
+                "valor": valor,
+                "valor_normalizado": normalizado,
+                "contexto": contexto_do_match(texto, match.start(1), match.end(1)),
+            })
 
     return entidades
 
@@ -370,49 +561,6 @@ def atualizar_prompt_workspace():
             )
     except Exception as e:
         print(f"[-] Erro ao atualizar prompt do workspace: {e}")
-
-def fixar_documento_recente_no_workspace(conn, local_anything, nome_arquivo):
-    """Fixa o documento mais recente no workspace para entrar direto no contexto do chat."""
-    cursor = conn.cursor()
-    try:
-        cursor.execute(
-            "SELECT id FROM workspaces WHERE slug = %s",
-            (WORKSPACE_SLUG,),
-        )
-        workspace = cursor.fetchone()
-        if not workspace:
-            print(f"[-] Workspace {WORKSPACE_SLUG} não encontrado para fixar {nome_arquivo}.")
-            return
-
-        workspace_id = workspace[0]
-        cursor.execute(
-            'UPDATE workspace_documents SET pinned = FALSE WHERE "workspaceId" = %s',
-            (workspace_id,),
-        )
-        cursor.execute(
-            '''
-                UPDATE workspace_documents
-                SET pinned = TRUE, "lastUpdatedAt" = CURRENT_TIMESTAMP
-                WHERE "workspaceId" = %s AND docpath = %s
-            ''',
-            (workspace_id, local_anything),
-        )
-
-        if cursor.rowcount == 0:
-            print(f"[-] Documento {nome_arquivo} foi vetorizado, mas não foi encontrado para fixar.")
-        else:
-            cursor.execute(
-                'UPDATE workspaces SET "lastUpdatedAt" = CURRENT_TIMESTAMP WHERE id = %s',
-                (workspace_id,),
-            )
-            print(f"[+] Documento fixado como contexto recente do chat: {nome_arquivo}")
-
-        conn.commit()
-    except Exception as e:
-        conn.rollback()
-        print(f"[-] Erro ao fixar {nome_arquivo} no workspace: {e}")
-    finally:
-        cursor.close()
 
 # ---------------------------------------------------------------------------
 # FUNÇÕES AUXILIARES
@@ -574,7 +722,6 @@ def iniciar_monitoramento():
                         # 1. Salva no banco com todos os metadados
                         registrar_arquivo(conn, nome_arquivo, ent_id, rel_id, tipo, data_producao, local_anything)
                         registrar_entidades_documento(conn, nome_arquivo, local_anything)
-                        fixar_documento_recente_no_workspace(conn, local_anything, nome_arquivo)
                         
                         # 2. Move o arquivo fisicamente para a pasta de processados
                         if os.path.exists(caminho_processado):
@@ -593,5 +740,49 @@ def iniciar_monitoramento():
     finally:
         conn.close()
 
+def reprocessar_entidades_indexadas():
+    """Reextrai entidades de todos os documentos já presentes em sincronismo."""
+    conn = inicializar_banco()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT nome_arquivo, local_anything FROM sincronismo ORDER BY nome_arquivo"
+        )
+        registros = cursor.fetchall()
+    finally:
+        cursor.close()
+
+    total = len(registros)
+    processados = 0
+    sem_texto = 0
+    erros = 0
+    print(f"[*] Reprocessando entidades de {total} documento(s)...")
+
+    for indice, (nome_arquivo, local_anything) in enumerate(registros, start=1):
+        try:
+            texto = carregar_texto_anything(local_anything)
+            if not texto.strip():
+                sem_texto += 1
+                continue
+            registrar_entidades_documento(conn, nome_arquivo, local_anything)
+            processados += 1
+        except Exception as e:
+            erros += 1
+            print(f"[-] Falha em {nome_arquivo}: {e}")
+
+        if indice % 100 == 0 or indice == total:
+            print(f"[~] Progresso: {indice}/{total} | ok={processados} | sem_texto={sem_texto} | erros={erros}")
+
+    conn.close()
+    print(
+        f"[+] Reprocessamento concluído: {processados} documento(s) atualizado(s), "
+        f"{sem_texto} sem texto, {erros} erro(s)."
+    )
+
 if __name__ == "__main__":
-    iniciar_monitoramento()
+    import sys
+
+    if len(sys.argv) > 1 and sys.argv[1] == "--reprocessar-entidades":
+        reprocessar_entidades_indexadas()
+    else:
+        iniciar_monitoramento()

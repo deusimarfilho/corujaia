@@ -104,6 +104,7 @@ services:
       - ./data/anythingllm/.env:/app/server/.env
       # Patch local: combina busca literal de nomes com a busca vetorial do pgvector
       - ./patches/anythingllm-pgvector-index.js:/app/server/utils/vectorDbProviders/pgvector/index.js:ro
+      - ./patches/anythingllm-apiChatHandler.js:/app/server/utils/chats/apiChatHandler.js:ro
     environment:
       - STORAGE_DIR=/app/server/storage
       - SERVER_PORT=3001
