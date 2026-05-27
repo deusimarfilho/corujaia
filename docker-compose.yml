@@ -96,12 +96,14 @@ services:
     image: mintplexlabs/anythingllm:pg
     container_name: corujaia_anythingllm
     ports:
-      - "3001:3001"
+      - "0.0.0.0:3001:3001"
     volumes:
       # Docs, cache e arquivos locais no projeto Windows
       - ./data/anythingllm:/app/server/storage
       # A imagem :pg le a conexao do banco neste caminho no boot
       - ./data/anythingllm/.env:/app/server/.env
+      # Patch local: combina busca literal de nomes com a busca vetorial do pgvector
+      - ./patches/anythingllm-pgvector-index.js:/app/server/utils/vectorDbProviders/pgvector/index.js:ro
     environment:
       - STORAGE_DIR=/app/server/storage
       - SERVER_PORT=3001

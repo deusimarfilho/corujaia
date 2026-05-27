@@ -15,6 +15,10 @@ BEGIN
     NEW."chatMode" := 'query';
   END IF;
 
+  IF NEW."openAiHistory" IS NULL OR NEW."openAiHistory" <> 20 THEN
+    NEW."openAiHistory" := 20;
+  END IF;
+
   IF NEW."chatProvider" IS NULL OR btrim(NEW."chatProvider") = '' THEN
     NEW."chatProvider" := 'lmstudio';
   END IF;
@@ -61,6 +65,10 @@ SET "chatMode" = 'query'
 WHERE "chatMode" IS NULL
    OR btrim("chatMode") = ''
    OR "chatMode" IN ('chat', 'automatic');
+
+UPDATE workspaces
+SET "openAiHistory" = 20
+WHERE "openAiHistory" IS DISTINCT FROM 20;
 
 UPDATE workspaces
 SET "chatProvider" = 'lmstudio'
