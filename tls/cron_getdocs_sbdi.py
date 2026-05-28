@@ -102,8 +102,6 @@ def processar_documento(documento):
     rel_id = documento.get("rel_id")
     rm_id = documento.get("rm_id", 0)
     nome_arquivo = documento.get("nome_arquivo")
-    nome_arquivo_txt = documento.get("nome_arquivo_txt")
-    texto = documento.get("texto")
     arquivo_base64 = documento.get("arquivo")
 
     if not id_informado(rel_id):
@@ -115,12 +113,10 @@ def processar_documento(documento):
 
     try:
         criou_pdf = salvar_arquivo_binario(nome_arquivo, arquivo_base64)
-        criou_txt = salvar_arquivo_texto(nome_arquivo_txt, texto)
-
-        if criou_pdf and criou_txt:
+        if criou_pdf:
             confirmar_documento(rel_id, rm_id)
         else:
-            print(f"[-] Documento rel_id={rel_id}, rm_id={rm_id} nao foi confirmado por falha ao criar arquivos.")
+            print(f"[-] Documento rel_id={rel_id}, rm_id={rm_id} nao foi confirmado por falha ao criar o PDF.")
     except Exception as e:
         print(f"[-] Erro ao processar documento rel_id={rel_id}, rm_id={rm_id}: {e}")
 

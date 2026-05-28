@@ -363,122 +363,11 @@ class PGVector extends VectorDatabase {
     }
   }
 
-  normalizeSearchText(text = "") {
-    return String(text)
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toUpperCase();
-  }
-
-  keywordSearchTerms(input = "") {
-    const stop = new Set([
-      "QUEM", "QUAL", "QUAIS", "NOME", "NOMES", "PESSOA", "PESSOAS",
-      "DOCUMENTO", "DOCUMENTOS", "ARQUIVO", "ARQUIVOS", "RELATORIO",
-      "RELATORIOS", "BUSCA", "LISTE", "LISTAR", "LISTA", "APARECE",
-      "APARECEM", "CONSTA", "CONSTAM", "CITADO", "CITADA", "CITADOS",
-      "TEM", "EXISTE", "SOBRE", "QUALQUER", "ALGUM", "ALGUMA", "COMO",
-      "ONDE", "QUANDO", "PARA", "POR", "QUE", "ESTA", "ESTE", "ESSA",
-      "ESSE", "AQUI", "TODOS", "TODAS", "TODO", "TODA", "INDEXADO",
-      "INDEXADOS", "RELATORIOS", "ANALISADOS", "DISPONIVEIS", "TRECHO",
-      "TRECHOS", "CITE", "CITAR", "INFORME", "INFORMAR", "MENCIONA",
-      "MENCIONAM", "ENCONTRADO", "ENCONTRADOS", "ENCONTREI", "BASE",
-      "BASEADO", "SOLICITACAO", "PERGUNTA", "RESPOSTA", "OPERADOR",
-    ]);
-    const terms =
-      this.normalizeSearchText(input)
-        .match(/[A-Z0-9]{4,}/g)
-        ?.filter((term) => !stop.has(term)) || [];
-
-    // Evita AND com dezenas de palavras da pergunta; prioriza termos mais especificos
-    return [...new Set(terms)]
-      .sort((a, b) => b.length - a.length)
-      .slice(0, 6);
-  }
-
-  /**
-   * Busca literal no texto indexado (metadata) para nomes e termos exatos.
-   * Complementa a busca vetorial quando o termo existe no banco mas não entra no topN.
-   */
-  async keywordResponse({
-    client,
-    namespace,
-    input = "",
-    topN = 6,
-    filterIdentifiers = [],
-  }) {
-    const terms = this.keywordSearchTerms(input);
-    if (terms.length === 0) return [];
-
-    const seen = new Set();
-    const matches = [];
-
-    const addRows = (rows) => {
-      rows.forEach((row) => {
-        const id = sourceIdentifier(row.metadata);
-        if (filterIdentifiers.includes(id) || seen.has(id)) return;
-        seen.add(id);
-        matches.push(row.metadata);
-      });
-    };
-
-    const normalizedPhrase = this.normalizeSearchText(input)
-      .replace(/[^A-Z0-9\s]/g, " ")
-      .replace(/\s+/g, " ")
-      .trim();
-
-    // 1) Frase completa (melhor para nomes: CICERO encontra CÍCERO)
-    if (normalizedPhrase.length >= 8 && normalizedPhrase.split(" ").length >= 3) {
-      const params = [namespace, `%${normalizedPhrase}%`];
-      const phraseResponse = await client.query(
-        `SELECT metadata
-         FROM "${PGVector.tableName()}"
-         WHERE namespace = $1
-           AND unaccent(metadata::text) ILIKE unaccent($2)
-         ORDER BY
-           CASE WHEN metadata->>'title' LIKE '%.json' THEN 0 ELSE 1 END,
-           created_at DESC
-         LIMIT 12`,
-        params
-      );
-      addRows(phraseResponse.rows);
-    }
-
-    // 2) Termos relevantes (AND) — no maximo 4 para nao exigir palavras da pergunta
-    const andTerms = terms.slice(0, 4);
-    if (andTerms.length < 2) return matches;
-
-    const params = [namespace];
-    const clauses = andTerms.map((term) => {
-      params.push(`%${term}%`);
-      const placeholder = `$${params.length}`;
-      return `unaccent(metadata::text) ILIKE unaccent(${placeholder})`;
-    });
-
-    const limit = Math.min(Math.max(topN * 3, 12), 24);
-    params.push(limit);
-    const limitPlaceholder = `$${params.length}`;
-
-    const response = await client.query(
-      `SELECT metadata
-       FROM "${PGVector.tableName()}"
-       WHERE namespace = $1 AND (${clauses.join(" AND ")})
-       ORDER BY
-         CASE WHEN metadata->>'title' LIKE '%.json' THEN 0 ELSE 1 END,
-         created_at DESC
-       LIMIT ${limitPlaceholder}`,
-      params
-    );
-    addRows(response.rows);
-
-    return matches;
-  }
-
   /**
    * Performs a SimilaritySearch on a given PGVector namespace.
    * @param {Object} params
    * @param {pgsql.Client} params.client
    * @param {string} params.namespace
-   * @param {string} params.input
    * @param {number[]} params.queryVector
    * @param {number} params.similarityThreshold
    * @param {number} params.topN
@@ -488,7 +377,6 @@ class PGVector extends VectorDatabase {
   async similarityResponse({
     client,
     namespace,
-    input = "",
     queryVector,
     similarityThreshold = 0.25,
     topN = 4,
@@ -499,67 +387,29 @@ class PGVector extends VectorDatabase {
       sourceDocuments: [],
       scores: [],
     };
-    const seenSources = new Set();
 
-    try {
-      const keywordMatches = await this.keywordResponse({
-        client,
-        namespace,
-        input,
-        topN,
-        filterIdentifiers,
-      });
-      if (keywordMatches.length > 0) {
+    const embedding = `[${queryVector.map(Number).join(",")}]`;
+    const response = await client.query(
+      `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata FROM "${PGVector.tableName()}" WHERE namespace = $2 ORDER BY _distance ASC LIMIT $3`,
+      [embedding, namespace, topN]
+    );
+    response.rows.forEach((item) => {
+      if (this.distanceToSimilarity(item._distance) < similarityThreshold)
+        return;
+      if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
         this.logger(
-          `Keyword search found ${keywordMatches.length} literal match(es) for query.`
+          "A source was filtered from context as it's parent document is pinned."
         );
+        return;
       }
-      keywordMatches.forEach((metadata) => {
-        const identifier = sourceIdentifier(metadata);
-        if (seenSources.has(identifier)) return;
-        seenSources.add(identifier);
-        result.contextTexts.push(metadata.text);
-        result.sourceDocuments.push({ ...metadata, score: 1 });
-        result.scores.push(1);
+
+      result.contextTexts.push(item.metadata.text);
+      result.sourceDocuments.push({
+        ...item.metadata,
+        score: this.distanceToSimilarity(item._distance),
       });
-    } catch (error) {
-      this.logger(`Keyword search skipped: ${error.message}`);
-    }
-
-    try {
-      if (!Array.isArray(queryVector) || queryVector.length === 0) {
-        this.logger("Vector search skipped: invalid query vector.");
-      } else {
-        const embedding = `[${queryVector.map(Number).join(",")}]`;
-        const response = await client.query(
-          `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata FROM "${PGVector.tableName()}" WHERE namespace = $2 ORDER BY _distance ASC LIMIT $3`,
-          [embedding, namespace, topN]
-        );
-        response.rows.forEach((item) => {
-          if (this.distanceToSimilarity(item._distance) < similarityThreshold)
-            return;
-          if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
-            this.logger(
-              "A source was filtered from context as it's parent document is pinned."
-            );
-            return;
-          }
-
-          const identifier = sourceIdentifier(item.metadata);
-          if (seenSources.has(identifier)) return;
-          seenSources.add(identifier);
-
-          result.contextTexts.push(item.metadata.text);
-          result.sourceDocuments.push({
-            ...item.metadata,
-            score: this.distanceToSimilarity(item._distance),
-          });
-          result.scores.push(this.distanceToSimilarity(item._distance));
-        });
-      }
-    } catch (error) {
-      this.logger(`Vector search skipped: ${error.message}`);
-    }
+      result.scores.push(this.distanceToSimilarity(item._distance));
+    });
 
     return result;
   }
@@ -893,7 +743,6 @@ class PGVector extends VectorDatabase {
       const result = await this.similarityResponse({
         client: connection,
         namespace,
-        input,
         queryVector,
         similarityThreshold,
         topN,
@@ -910,12 +759,7 @@ class PGVector extends VectorDatabase {
         message: false,
       };
     } catch (err) {
-      this.logger(`performSimilaritySearch failed: ${err.message}`);
-      return {
-        contextTexts: [],
-        sources: [],
-        message: err.message,
-      };
+      return { error: err.message, success: false };
     } finally {
       if (connection) await connection.end();
     }

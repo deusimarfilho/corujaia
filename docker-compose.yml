@@ -102,9 +102,8 @@ services:
       - ./data/anythingllm:/app/server/storage
       # A imagem :pg le a conexao do banco neste caminho no boot
       - ./data/anythingllm/.env:/app/server/.env
-      # Patch local: combina busca literal de nomes com a busca vetorial do pgvector
+      # Busca hibrida: vetorial + correspondencia literal (nomes/termos exatos)
       - ./patches/anythingllm-pgvector-index.js:/app/server/utils/vectorDbProviders/pgvector/index.js:ro
-      - ./patches/anythingllm-apiChatHandler.js:/app/server/utils/chats/apiChatHandler.js:ro
     environment:
       - STORAGE_DIR=/app/server/storage
       - SERVER_PORT=3001
@@ -116,8 +115,8 @@ services:
       # LLM Provider -> LM Studio via proxy local do stack
       - LLM_PROVIDER=lmstudio
       - LMSTUDIO_BASE_PATH=http://host.docker.internal:1235/v1
-      - LMSTUDIO_MODEL_PREF=qwen2.5-7b-instruct-20250329
-      - LMSTUDIO_MODEL_TOKEN_LIMIT=8192
+      - LMSTUDIO_MODEL_PREF=qwen3.5
+      - LMSTUDIO_MODEL_TOKEN_LIMIT=32768
 
       # Embeddings via NativeEmbedder (mais rapido em CPU)
       # Melhor opcao para indexacao rapida no seu ambiente atual
