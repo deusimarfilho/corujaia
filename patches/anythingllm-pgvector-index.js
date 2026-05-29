@@ -370,6 +370,129 @@ class PGVector extends VectorDatabase {
       .toUpperCase();
   }
 
+  documentTitle(metadata = {}) {
+    return String(metadata?.title || metadata?.sourceDocument || "");
+  }
+
+  documentBaseName(metadataOrTitle = "") {
+    const title =
+      typeof metadataOrTitle === "string"
+        ? metadataOrTitle
+        : this.documentTitle(metadataOrTitle);
+    return title.replace(/\.(pdf|json)$/i, "");
+  }
+
+  isJsonDocument(metadata = {}) {
+    return /\.json$/i.test(this.documentTitle(metadata));
+  }
+
+  isPdfDocument(metadata = {}) {
+    return /\.pdf$/i.test(this.documentTitle(metadata));
+  }
+
+  /**
+   * Garante que, para cada relatório encontrado, entram PDF e JSON no contexto.
+   */
+  async expandPdfJsonCompanions({
+    client,
+    namespace,
+    matches = [],
+    filterIdentifiers = [],
+  }) {
+    const table = PGVector.tableName();
+    const byBase = new Map();
+
+    matches.forEach((metadata) => {
+      const base = this.documentBaseName(metadata);
+      if (!base) return;
+      const entry = byBase.get(base) || { json: false, pdf: false };
+      if (this.isJsonDocument(metadata)) entry.json = true;
+      if (this.isPdfDocument(metadata)) entry.pdf = true;
+      byBase.set(base, entry);
+    });
+
+    const extras = [];
+    for (const [base, flags] of byBase.entries()) {
+      if (!flags.json) {
+        const jsonRes = await client.query(
+          `SELECT metadata
+           FROM "${table}"
+           WHERE namespace = $1 AND metadata->>'title' = $2
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [namespace, `${base}.json`]
+        );
+        if (jsonRes.rows[0]) extras.push(jsonRes.rows[0].metadata);
+      }
+      if (!flags.pdf) {
+        const pdfRes = await client.query(
+          `SELECT metadata
+           FROM "${table}"
+           WHERE namespace = $1 AND metadata->>'title' = $2
+           ORDER BY created_at DESC
+           LIMIT 1`,
+          [namespace, `${base}.pdf`]
+        );
+        if (pdfRes.rows[0]) extras.push(pdfRes.rows[0].metadata);
+      }
+    }
+
+    const seen = new Set(matches.map((m) => sourceIdentifier(m)));
+    const merged = [...matches];
+    extras.forEach((metadata) => {
+      const id = sourceIdentifier(metadata);
+      if (filterIdentifiers.includes(id) || seen.has(id)) return;
+      seen.add(id);
+      merged.push(metadata);
+    });
+    return merged;
+  }
+
+  async scoredKeywordByFormat({
+    client,
+    namespace,
+    topTerms,
+    format,
+    limit,
+    minMatch,
+    recordRow,
+    scoreBoost = 0,
+  }) {
+    const table = PGVector.tableName();
+    const formatClause =
+      format === "json"
+        ? "metadata->>'title' LIKE '%.json'"
+        : "metadata->>'title' LIKE '%.pdf'";
+
+    const params = [namespace];
+    const scoreExpr = topTerms
+      .map((term) => {
+        params.push(`%${term}%`);
+        return `(CASE WHEN unaccent(metadata::text) ILIKE unaccent($${params.length}) THEN 1 ELSE 0 END)`;
+      })
+      .join(" + ");
+
+    params.push(minMatch);
+    params.push(limit);
+    const minPlaceholder = `$${params.length - 1}`;
+    const limitPlaceholder = `$${params.length}`;
+
+    const response = await client.query(
+      `SELECT metadata, (${scoreExpr}) AS match_score
+       FROM "${table}"
+       WHERE namespace = $1
+         AND ${formatClause}
+         AND (${scoreExpr}) >= ${minPlaceholder}
+       ORDER BY match_score DESC, created_at DESC
+       LIMIT ${limitPlaceholder}`,
+      params
+    );
+
+    response.rows.forEach((row) =>
+      recordRow(row, (Number(row.match_score) || 1) + scoreBoost)
+    );
+  }
+
   keywordSearchTerms(input = "") {
     const stop = new Set([
       "QUEM", "QUAL", "QUAIS", "NOME", "NOMES", "PESSOA", "PESSOAS",
@@ -383,6 +506,9 @@ class PGVector extends VectorDatabase {
       "TRECHOS", "CITE", "CITAR", "INFORME", "INFORMAR", "MENCIONA",
       "MENCIONAM", "ENCONTRADO", "ENCONTRADOS", "ENCONTREI", "BASE",
       "BASEADO", "SOLICITACAO", "PERGUNTA", "RESPOSTA", "OPERADOR",
+      "SUSPEITO", "SUSPEITA", "SUSPEITOS", "DIZ", "DIGA", "DIZER", "FALE",
+      "FALAR", "ME", "ABERTO", "ABERTA", "VERIFICAR", "VERIFIQUE", "ESTOU",
+      "DIVERSOS", "DIVERSAS", "VARIOS", "VARIAS",
     ]);
     const terms =
       this.normalizeSearchText(input)
@@ -409,68 +535,122 @@ class PGVector extends VectorDatabase {
     const terms = this.keywordSearchTerms(input);
     if (terms.length === 0) return [];
 
-    const seen = new Set();
-    const matches = [];
+    const bestBySource = new Map();
 
-    const addRows = (rows) => {
-      rows.forEach((row) => {
-        const id = sourceIdentifier(row.metadata);
-        if (filterIdentifiers.includes(id) || seen.has(id)) return;
-        seen.add(id);
-        matches.push(row.metadata);
-      });
+    const recordRow = (row, score = 1) => {
+      const id = sourceIdentifier(row.metadata);
+      if (filterIdentifiers.includes(id)) return;
+      const prev = bestBySource.get(id);
+      if (!prev || score > prev.score) {
+        bestBySource.set(id, { metadata: row.metadata, score });
+      }
     };
+
+    const table = PGVector.tableName();
+    const perFormatLimit = Math.min(Math.max(topN * 3, 12), 24);
 
     const normalizedPhrase = this.normalizeSearchText(input)
       .replace(/[^A-Z0-9\s]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
 
-    // 1) Frase completa (melhor para nomes: CICERO encontra CÍCERO)
+    // 1) Frase completa (nomes longos)
     if (normalizedPhrase.length >= 8 && normalizedPhrase.split(" ").length >= 3) {
-      const params = [namespace, `%${normalizedPhrase}%`];
       const phraseResponse = await client.query(
         `SELECT metadata
-         FROM "${PGVector.tableName()}"
+         FROM "${table}"
          WHERE namespace = $1
            AND unaccent(metadata::text) ILIKE unaccent($2)
-         ORDER BY
-           CASE WHEN metadata->>'title' LIKE '%.json' THEN 0 ELSE 1 END,
-           created_at DESC
+         ORDER BY created_at DESC
          LIMIT 12`,
-        params
+        [namespace, `%${normalizedPhrase}%`]
       );
-      addRows(phraseResponse.rows);
+      phraseResponse.rows.forEach((row) => recordRow(row, 10));
     }
 
-    // 2) Termos relevantes (AND) — no maximo 4 para nao exigir palavras da pergunta
-    const andTerms = terms.slice(0, 4);
-    if (andTerms.length < 2) return matches;
+    const topTerms = terms.slice(0, 6);
+    const minMatch = topTerms.length >= 2 ? 2 : 1;
 
-    const params = [namespace];
-    const clauses = andTerms.map((term) => {
-      params.push(`%${term}%`);
-      const placeholder = `$${params.length}`;
-      return `unaccent(metadata::text) ILIKE unaccent(${placeholder})`;
-    });
+    if (topTerms.length >= 1) {
+      for (const format of ["json", "pdf"]) {
+        await this.scoredKeywordByFormat({
+          client,
+          namespace,
+          topTerms,
+          format,
+          limit: perFormatLimit,
+          minMatch,
+          recordRow,
+        });
+      }
+    }
 
-    const limit = Math.min(Math.max(topN * 3, 12), 24);
-    params.push(limit);
-    const limitPlaceholder = `$${params.length}`;
+    if (topTerms.length >= 2) {
+      // Reforço: termos com match alto em ambos os formatos
+      for (const format of ["json", "pdf"]) {
+        await this.scoredKeywordByFormat({
+          client,
+          namespace,
+          topTerms,
+          format,
+          limit: perFormatLimit,
+          minMatch: Math.min(3, topTerms.length),
+          recordRow,
+          scoreBoost: 2,
+        });
+      }
+    }
 
-    const response = await client.query(
-      `SELECT metadata
-       FROM "${PGVector.tableName()}"
-       WHERE namespace = $1 AND (${clauses.join(" AND ")})
-       ORDER BY
-         CASE WHEN metadata->>'title' LIKE '%.json' THEN 0 ELSE 1 END,
-         created_at DESC
-       LIMIT ${limitPlaceholder}`,
-      params
+    // Pares investigativos (ex: MANDANTE + PENTECOSTE) — busca ampla em PDF e JSON
+    const investigativos = new Set([
+      "MANDANTE",
+      "HOMICIDIO",
+      "HOMICIDIOS",
+      "AUTOR",
+      "EXECUTOR",
+      "FACCAO",
+      "ORCRIM",
+    ]);
+    const locais = topTerms.filter(
+      (t) =>
+        !investigativos.has(t) &&
+        t.length >= 5 &&
+        !["SUSPEITO", "CRIME", "CRIMES"].includes(t)
     );
-    addRows(response.rows);
+    const chaves = topTerms.filter((t) => investigativos.has(t));
 
-    return matches;
+    for (const chave of chaves) {
+      for (const local of locais.slice(0, 3)) {
+        for (const formatClause of [
+          "metadata->>'title' LIKE '%.json'",
+          "metadata->>'title' LIKE '%.pdf'",
+        ]) {
+          const pairResponse = await client.query(
+            `SELECT metadata
+             FROM "${table}"
+             WHERE namespace = $1
+               AND ${formatClause}
+               AND unaccent(metadata::text) ILIKE unaccent($2)
+               AND unaccent(metadata::text) ILIKE unaccent($3)
+             ORDER BY created_at DESC
+             LIMIT 6`,
+            [namespace, `%${chave}%`, `%${local}%`]
+          );
+          pairResponse.rows.forEach((row) => recordRow(row, 8));
+        }
+      }
+    }
+
+    const ranked = [...bestBySource.values()]
+      .sort((a, b) => b.score - a.score)
+      .map((item) => item.metadata);
+
+    return this.expandPdfJsonCompanions({
+      client,
+      namespace,
+      matches: ranked,
+      filterIdentifiers,
+    });
   }
 
   /**
@@ -519,46 +699,87 @@ class PGVector extends VectorDatabase {
         if (seenSources.has(identifier)) return;
         seenSources.add(identifier);
         result.contextTexts.push(metadata.text);
-        result.sourceDocuments.push({ ...metadata, score: 1 });
-        result.scores.push(1);
+        result.sourceDocuments.push({ ...metadata, score: 1.05 });
+        result.scores.push(1.05);
       });
     } catch (error) {
       this.logger(`Keyword search skipped: ${error.message}`);
     }
+
+    const addVectorRows = (rows) => {
+      rows.forEach((item) => {
+        if (this.distanceToSimilarity(item._distance) < similarityThreshold)
+          return;
+        if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
+          this.logger(
+            "A source was filtered from context as it's parent document is pinned."
+          );
+          return;
+        }
+
+        const identifier = sourceIdentifier(item.metadata);
+        if (seenSources.has(identifier)) return;
+        seenSources.add(identifier);
+
+        result.contextTexts.push(item.metadata.text);
+        result.sourceDocuments.push({
+          ...item.metadata,
+          score: this.distanceToSimilarity(item._distance),
+        });
+        result.scores.push(this.distanceToSimilarity(item._distance));
+      });
+    };
 
     try {
       if (!Array.isArray(queryVector) || queryVector.length === 0) {
         this.logger("Vector search skipped: invalid query vector.");
       } else {
         const embedding = `[${queryVector.map(Number).join(",")}]`;
-        const response = await client.query(
-          `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata FROM "${PGVector.tableName()}" WHERE namespace = $2 ORDER BY _distance ASC LIMIT $3`,
-          [embedding, namespace, topN]
+        const table = PGVector.tableName();
+        const perFormatVectorLimit = Math.max(Math.ceil(topN / 2), 5);
+
+        const pdfResponse = await client.query(
+          `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata
+           FROM "${table}"
+           WHERE namespace = $2 AND metadata->>'title' LIKE '%.pdf'
+           ORDER BY _distance ASC
+           LIMIT $3`,
+          [embedding, namespace, perFormatVectorLimit]
         );
-        response.rows.forEach((item) => {
-          if (this.distanceToSimilarity(item._distance) < similarityThreshold)
-            return;
-          if (filterIdentifiers.includes(sourceIdentifier(item.metadata))) {
-            this.logger(
-              "A source was filtered from context as it's parent document is pinned."
-            );
-            return;
-          }
+        addVectorRows(pdfResponse.rows);
 
-          const identifier = sourceIdentifier(item.metadata);
-          if (seenSources.has(identifier)) return;
-          seenSources.add(identifier);
-
-          result.contextTexts.push(item.metadata.text);
-          result.sourceDocuments.push({
-            ...item.metadata,
-            score: this.distanceToSimilarity(item._distance),
-          });
-          result.scores.push(this.distanceToSimilarity(item._distance));
-        });
+        const jsonResponse = await client.query(
+          `SELECT embedding ${this.operator.cosine} $1 AS _distance, metadata
+           FROM "${table}"
+           WHERE namespace = $2 AND metadata->>'title' LIKE '%.json'
+           ORDER BY _distance ASC
+           LIMIT $3`,
+          [embedding, namespace, perFormatVectorLimit]
+        );
+        addVectorRows(jsonResponse.rows);
       }
     } catch (error) {
       this.logger(`Vector search skipped: ${error.message}`);
+    }
+
+    // Completa pares PDF+JSON para relatórios já recuperados
+    try {
+      const expanded = await this.expandPdfJsonCompanions({
+        client,
+        namespace,
+        matches: result.sourceDocuments.map((doc) => doc),
+        filterIdentifiers,
+      });
+      expanded.forEach((metadata) => {
+        const identifier = sourceIdentifier(metadata);
+        if (seenSources.has(identifier)) return;
+        seenSources.add(identifier);
+        result.contextTexts.push(metadata.text);
+        result.sourceDocuments.push({ ...metadata, score: 1.02 });
+        result.scores.push(1.02);
+      });
+    } catch (error) {
+      this.logger(`PDF/JSON companion expansion skipped: ${error.message}`);
     }
 
     return result;

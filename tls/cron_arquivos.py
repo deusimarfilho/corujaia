@@ -42,7 +42,11 @@ PGPASSWORD = "corujaia_pgvector_2026"
 BASE_DIR = r"E:\xampp\htdocs\corujaia\arquivos\sbdi"
 DIR_PENDENTES = os.path.join(BASE_DIR, "pendentes")
 DIR_PROCESSADOS = os.path.join(BASE_DIR, "processados")
+DIR_ERROS = os.path.join(BASE_DIR, "erros")
 ANYTHING_DOCS_DIR = r"E:\xampp\htdocs\corujaia\data\anythingllm\documents"
+
+class ErroLeituraPdf(Exception):
+    """PDF corrompido, protegido ou ilegível para extração de texto."""
 
 PADROES_ENTIDADES = {
     "cpf": re.compile(r"\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b"),
@@ -50,7 +54,7 @@ PADROES_ENTIDADES = {
     "processo": re.compile(r"\b\d{7}-\d{2}\.\d{4}\.\d\.\d{2}\.\d{4}\b"),
     "inquerito": re.compile(r"\b(?:IP|INQUERITO|INQUÉRITO|BO|B\.O\.|ATO)\s*(?:N[ºO°.]*)?\s*[:\-]?\s*\d{1,6}[-/]\d{1,6}/\d{4}\b", re.IGNORECASE),
     "endereco": re.compile(r"\b(?:RUA|AVENIDA|AV\.|TRAVESSA|TV\.|RODOVIA|ESTRADA)\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ0-9 .,'ºª/-]{5,120}", re.IGNORECASE),
-    "local": re.compile(r"\b(?:CAUCAIA|FORTALEZA|MARACANAU|MARACANAÚ|EUSEBIO|EUSÉBIO|AQUIRAZ|SOBRAL|ITAPIPOCA|CANINDE|CANINDÉ|JUAZEIRO DO NORTE|MARANGUAPE|PACAJUS|HORIZONTE|RUSSAS|QUIXADA|QUIXADÁ)\b", re.IGNORECASE),
+    "local": re.compile(r"\b(?:CAUCAIA|FORTALEZA|MARACANAU|MARACANAÚ|EUSEBIO|EUSÉBIO|AQUIRAZ|SOBRAL|ITAPIPOCA|CANINDE|CANINDÉ|JUAZEIRO DO NORTE|MARANGUAPE|PACAJUS|HORIZONTE|RUSSAS|QUIXADA|QUIXADÁ|PENTECOSTE|PARACURU|CRATEUS|CRATEÚS|TIANGUA|TIANGUÁ|CAMOCIM|GRANJA|ACARAU|ACARAÚ)\b", re.IGNORECASE),
     "crime": re.compile(r"\b(?:HOMIC[IÍ]DIO|TR[AÁ]FICO|ROUBO|FURTO|EXTORS[AÃ]O|AMEA[CÇ]A|FAC[CÇ][AÃ]O|ORCRIM|DROGAS?|ARMA DE FOGO|DESLOCAMENTO FOR[CÇ]ADO|TENTATIVA DE HOMIC[IÍ]DIO)\b", re.IGNORECASE),
 }
 
@@ -70,6 +74,16 @@ PADROES_PESSOA = [
     ),
 ]
 # Nomes longos em caixa alta (4+ palavras, ex: CÍCERO PEREIRA LIMA DE SOUSA)
+PADRAO_MUNICIPIO_TEXTO = re.compile(
+    r"\b(?:REGIAO|REGIÃO|CIDADE|MUNICIPIO|MUNICÍPIO|COMARCA DE)\s+(?:DE\s+)?([A-ZÁÉÍÓÚÂÊÔÃÕÇ][A-ZÁÉÍÓÚÂÊÔÃÕÇ\s-]{2,40})\b",
+    re.IGNORECASE,
+)
+PADRAO_FRASE_INVESTIGATIVA = re.compile(
+    r"[^.\n\r]{0,200}(?:mandante|autor intelectual|ordem(?:ou)?(?:\s+os)?\s+homic|"
+    r"respons[aá]vel(?:\s+pel[oa])?\s+homic|mandou matar|"
+    r"conhecido por [A-ZÁÉÍÓÚÂÊÔÃÕÇ0-9 .'-]{4,60})[^.\n\r]{0,200}[.\n\r]",
+    re.IGNORECASE,
+)
 PADRAO_NOME_LONGO = re.compile(
     r"\b([A-ZÁÉÍÓÚÂÊÔÃÕÇ]{3,}(?:\s+(?:DE|DA|DO|DAS|DOS|E))?(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]{2,}){3,6})\b"
 )
@@ -250,7 +264,16 @@ def extrair_texto_pdf(caminho_pdf):
                 partes.append("")
         return "\n".join(partes)
     except Exception as e:
-        raise RuntimeError(f"Falha ao extrair texto do PDF {caminho_pdf}: {e}") from e
+        raise ErroLeituraPdf(f"Falha ao extrair texto do PDF {caminho_pdf}: {e}") from e
+
+def mover_arquivo_para_erros(caminho_origem, nome_arquivo):
+    """Move o PDF com falha de leitura da pasta pendentes para erros."""
+    os.makedirs(DIR_ERROS, exist_ok=True)
+    destino = os.path.join(DIR_ERROS, nome_arquivo)
+    if os.path.exists(destino):
+        os.remove(destino)
+    shutil.move(caminho_origem, destino)
+    return destino
 
 def parece_nome_pessoa(valor):
     normalizado = normalizar_texto(valor)
@@ -374,6 +397,36 @@ def extrair_entidades_texto(texto):
             "contexto": contexto_do_match(texto, match.start(1), match.end(1)),
         })
 
+    for match in PADRAO_MUNICIPIO_TEXTO.finditer(texto):
+        valor = re.sub(r"\s+", " ", match.group(1).strip(" .,;:\n\r\t"))
+        normalizado = normalizar_texto(valor)
+        chave = ("local", normalizado)
+        if not normalizado or len(normalizado) < 4 or chave in vistos:
+            continue
+        vistos.add(chave)
+        entidades.append({
+            "tipo": "local",
+            "valor": valor,
+            "valor_normalizado": normalizado,
+            "contexto": contexto_do_match(texto, match.start(), match.end()),
+        })
+
+    for match in PADRAO_FRASE_INVESTIGATIVA.finditer(texto):
+        valor = re.sub(r"\s+", " ", match.group(0).replace("\x00", "").strip(" .,;:\n\r\t"))
+        if len(valor) < 25:
+            continue
+        normalizado = normalizar_texto(valor)
+        chave = ("investigacao", normalizado[:220])
+        if chave in vistos:
+            continue
+        vistos.add(chave)
+        entidades.append({
+            "tipo": "investigacao",
+            "valor": valor[:500],
+            "valor_normalizado": normalizado[:220],
+            "contexto": contexto_do_match(texto, match.start(), match.end(), tamanho=120),
+        })
+
     return entidades
 
 def caminho_json_entidades(caminho_pdf):
@@ -388,13 +441,18 @@ MIN_CARACTERES_TEXTO_PDF = 80
 # ---------------------------------------------------------------------------
 def criar_json_entidades_para_pdf(caminho_pdf, nome_arquivo_pdf):
     """
-    Gera JSON achatado para RAG somente quando o PDF tiver texto legível
-    e pelo menos uma entidade extraída. Caso contrário retorna None (só PDF).
+    Gera JSON achatado para RAG quando o PDF tiver texto legível e entidades.
+    Levanta ErroLeituraPdf se não houver texto extraível.
+    Retorna None se houver texto mas nenhuma entidade (envia só o PDF).
     """
     texto = extrair_texto_pdf(caminho_pdf)
     texto_limpo = (texto or "").strip()
     if len(texto_limpo) < MIN_CARACTERES_TEXTO_PDF:
-        return None
+        raise ErroLeituraPdf(
+            f"Nenhum texto extraído de {nome_arquivo_pdf} "
+            f"({len(texto_limpo)} caracteres; mínimo {MIN_CARACTERES_TEXTO_PDF}). "
+            "Possível scan sem OCR ou PDF ilegível."
+        )
 
     entidades = extrair_entidades_texto(texto)
     if not entidades:
@@ -432,6 +490,12 @@ def criar_json_entidades_para_pdf(caminho_pdf, nome_arquivo_pdf):
         if pessoas
         else "INDICE DE NOMES PARA BUSCA: nenhum."
     )
+    frases_inv = sorted(list(buckets.get("investigacao", [])))
+    texto_busca_investigacao = (
+        "INDICE INVESTIGATIVO: " + " | ".join(frases_inv)
+        if frases_inv
+        else "INDICE INVESTIGATIVO: nenhum."
+    )
 
     # Converte os sets em strings limpas separadas por vírgula e insere o resumo
     saida = {
@@ -439,6 +503,7 @@ def criar_json_entidades_para_pdf(caminho_pdf, nome_arquivo_pdf):
         "metadados_gerais": f"Entidades identificadas no relatório {nome_arquivo_pdf}.",
         "indice_nomes_completo": indice_nomes,
         "texto_busca_nomes": texto_busca_nomes,
+        "texto_busca_investigacao": texto_busca_investigacao,
         "resumo_estruturado": resumo if resumo else "Nenhuma entidade para resumir.",
         "pessoas_identificadas": ", ".join(pessoas) or "Nenhuma identificada.",
         "documentos_cpf": ", ".join(sorted(list(buckets.get("cpf", [])))) or "Nenhum identificado.",
@@ -448,6 +513,7 @@ def criar_json_entidades_para_pdf(caminho_pdf, nome_arquivo_pdf):
         "enderecos_e_logradouros": ", ".join(sorted(list(buckets.get("endereco", [])))) or "Nenhum endereço identificado.",
         "municipios_citados": ", ".join(sorted(list(buckets.get("local", [])))) or "Nenhum município identificado.",
         "crimes_e_faccoes": ", ".join(sorted(list(buckets.get("crime", [])))) or "Nenhum indício criminal mapeado.",
+        "frases_investigativas": " | ".join(frases_inv) or "Nenhuma identificada.",
         "termos_frequentes_nuvem": ", ".join([f"{w['termo']}({w['count']})" for w in word_cloud]) if word_cloud else "Nenhum.",
         "total_entidades_unicas": len(entidades),
     }
@@ -578,6 +644,7 @@ def processar_arquivo_anythingllm(caminho_completo, nome_arquivo):
 def iniciar_monitoramento():
     os.makedirs(DIR_PENDENTES, exist_ok=True)
     os.makedirs(DIR_PROCESSADOS, exist_ok=True)
+    os.makedirs(DIR_ERROS, exist_ok=True)
     
     print(f"[*] Monitorando a pasta: {DIR_PENDENTES}")
     print("[*] Pressione Ctrl+C para parar.\n")
@@ -614,13 +681,24 @@ def iniciar_monitoramento():
                         if os.path.exists(caminho_json_candidato):
                             os.remove(caminho_json_candidato)
                         print(
-                            f"[*] Sem entidades extraídas de {nome_arquivo} "
-                            f"(texto vazio ou ilegível). Enviando apenas o PDF."
+                            f"[*] Sem entidades extraídas de {nome_arquivo}. "
+                            f"Enviando apenas o PDF."
                         )
+                except ErroLeituraPdf as e:
+                    if os.path.exists(caminho_json_candidato):
+                        os.remove(caminho_json_candidato)
+                    try:
+                        destino_erro = mover_arquivo_para_erros(caminho_pendente, nome_arquivo)
+                        print(f"[!] Falha ao ler PDF {nome_arquivo}: {e}")
+                        print(f"[!] Arquivo movido para: {destino_erro}")
+                    except Exception as move_err:
+                        print(f"[!] Falha ao ler PDF {nome_arquivo}: {e}")
+                        print(f"[-] Não foi possível mover para {DIR_ERROS}: {move_err}")
+                    continue
                 except Exception as e:
                     if os.path.exists(caminho_json_candidato):
                         os.remove(caminho_json_candidato)
-                    print(f"[!] Falha ao ler PDF para extração de {nome_arquivo}: {e}")
+                    print(f"[!] Erro inesperado ao processar {nome_arquivo}: {e}")
                     print("[!] Enviando apenas o PDF (sem JSON de entidades).")
 
                 substituir = True

@@ -104,6 +104,9 @@ services:
       - ./data/anythingllm/.env:/app/server/.env
       # Busca hibrida: vetorial + correspondencia literal (nomes/termos exatos)
       - ./patches/anythingllm-pgvector-index.js:/app/server/utils/vectorDbProviders/pgvector/index.js:ro
+      # Finaliza stream mesmo quando LM Studio nao envia finish_reason
+      - ./patches/anythingllm-stream-responses.js:/app/server/utils/helpers/chat/responses.js:ro
+      - ./patches/anythingllm-lmstudio-index.js:/app/server/utils/AiProviders/lmStudio/index.js:ro
     environment:
       - STORAGE_DIR=/app/server/storage
       - SERVER_PORT=3001
@@ -117,6 +120,7 @@ services:
       - LMSTUDIO_BASE_PATH=http://host.docker.internal:1235/v1
       - LMSTUDIO_MODEL_PREF=qwen3.5
       - LMSTUDIO_MODEL_TOKEN_LIMIT=32768
+      - LMSTUDIO_MAX_OUTPUT_TOKENS=16384
 
       # Embeddings via NativeEmbedder (mais rapido em CPU)
       # Melhor opcao para indexacao rapida no seu ambiente atual
